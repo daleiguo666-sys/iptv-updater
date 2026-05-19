@@ -334,14 +334,21 @@ def filter_country(channels: list[Channel], allowed: list[str]) -> list[Channel]
     return out
 
 
-def filter_whitelist(channels: list[Channel], mode: str, keywords: list[str]) -> list[Channel]:
-    if mode != "whitelist" or not keywords:
+def _normalize_for_match(s: str) -> str:
+    """Same normalization as Channel.norm_name, for matching config strings."""
+    s = re.sub(r"[\(\[].*?[\)\]]", "", s)
+    s = s.upper().replace(" ", "").replace("-", "").replace("_", "")
+    return re.sub(r"[^A-Z0-9一-鿿+]", "", s)
+
+
+def filter_exact_channels(channels: list[Channel], wanted: list[str]) -> list[Channel]:
+    """Keep only channels whose normalized name matches one of wanted."""
+    if not wanted:
         return channels
-    kws = [k.upper() for k in keywords if k]
+    wanted_norms = {_normalize_for_match(w) for w in wanted}
     out: list[Channel] = []
     for c in channels:
-        hay = (c.name + " " + c.group).upper()
-        if any(kw in hay for kw in kws):
+        if c.norm_name in wanted_norms:
             out.append(c)
     return out
 
@@ -360,35 +367,53 @@ def limit_per_channel(channels: list[Channel], max_per: int) -> list[Channel]:
     return out
 
 
-def is_sport(channel: Channel, keywords: list[str]) -> int:
-    """Return sport rank: lower = more preferred; 10**6 if not sport."""
-    hay = (channel.name + " " + channel.group).upper()
-    for idx, kw in enumerate(keywords):
-        if kw.upper() in hay:
-            return idx
+def channel_rank(channel: Channel, ordered_wanted: list[str]) -> int:
+    """Index in ordered_wanted by normalized match; 10**6 if no match."""
+    norm = channel.norm_name
+    for i, w in enumerate(ordered_wanted):
+        if _normalize_for_match(w) == norm:
+            return i
     return 10**6
 
 
-def sort_channels(channels: list[Channel], keywords: list[str]) -> list[Channel]:
-    # Sports first (by keyword index), then highest throughput, then lowest latency, then name
+def sort_channels(channels: list[Channel], ordered_wanted: list[str]) -> list[Channel]:
+    # By user-specified order first, then highest throughput, then lowest latency
     return sorted(
         channels,
-        key=lambda c: (is_sport(c, keywords), -c.throughput_kbps, c.latency_ms, c.name),
+        key=lambda c: (channel_rank(c, ordered_wanted), -c.throughput_kbps, c.latency_ms, c.name),
     )
 
 
-def render_m3u(channels: list[Channel], keywords: list[str]) -> str:
+def display_name(channel: Channel, ordered_wanted: list[str]) -> str:
+    """Prefer the canonical config name when matched, else the upstream display name."""
+    rank = channel_rank(channel, ordered_wanted)
+    if rank < len(ordered_wanted):
+        return ordered_wanted[rank]
+    return channel.name
+
+
+def group_for(name: str) -> str:
+    n = name.upper()
+    if n.startswith("CCTV"):
+        return "央视"
+    if "凤凰" in name:
+        return "凤凰卫视"
+    return "其他"
+
+
+def render_m3u(channels: list[Channel], ordered_wanted: list[str]) -> str:
     lines = ["#EXTM3U"]
     for c in channels:
-        group = "体育" if is_sport(c, keywords) < 10**6 else (c.group or "其他")
+        name = display_name(c, ordered_wanted)
+        group = group_for(name)
         attrs = []
         if c.tvg_id:
             attrs.append(f'tvg-id="{c.tvg_id}"')
-        attrs.append(f'tvg-name="{c.name}"')
+        attrs.append(f'tvg-name="{name}"')
         if c.logo:
             attrs.append(f'tvg-logo="{c.logo}"')
         attrs.append(f'group-title="{group}"')
-        lines.append(f"#EXTINF:-1 {' '.join(attrs)},{c.name}")
+        lines.append(f"#EXTINF:-1 {' '.join(attrs)},{name}")
         lines.append(c.url)
     return "\n".join(lines) + "\n"
 
@@ -396,12 +421,15 @@ def render_m3u(channels: list[Channel], keywords: list[str]) -> str:
 def main() -> int:
     cfg = load_config()
     sources = cfg.get("sources") or []
-    keywords = cfg.get("sports_keywords") or []
+    wanted = cfg.get("channels") or []
     blacklist = cfg.get("blacklist_domains") or []
     fetch_timeout = int((cfg.get("probe") or {}).get("fetch_timeout_seconds", 10))
 
     if not sources:
         print("no sources configured", file=sys.stderr)
+        return 1
+    if not wanted:
+        print("no channels configured in `channels:` list", file=sys.stderr)
         return 1
 
     raw: list[Channel] = []
@@ -423,13 +451,11 @@ def main() -> int:
     filtered = [c for c in raw if not is_blacklisted(c.url, blacklist)]
     print(f"after blacklist: {len(filtered)} (was {len(raw)})")
 
-    filter_cfg = cfg.get("filter") or {}
-    mode = filter_cfg.get("mode", "all")
-    wl_keywords = filter_cfg.get("keywords") or []
-    if mode == "whitelist":
-        filtered = filter_whitelist(filtered, mode, wl_keywords)
-        print(f"after whitelist ({len(wl_keywords)} keywords): {len(filtered)}")
+    before = len(filtered)
+    filtered = filter_exact_channels(filtered, wanted)
+    print(f"after channel whitelist ({len(wanted)} channels): {len(filtered)} (was {before})")
 
+    filter_cfg = cfg.get("filter") or {}
     allowed_countries = filter_cfg.get("allowed_countries") or []
     if allowed_countries:
         before = len(filtered)
@@ -446,7 +472,7 @@ def main() -> int:
         print("no live channels — refusing to overwrite live.m3u", file=sys.stderr)
         return 1
 
-    sorted_ch = sort_channels(alive, keywords)
+    sorted_ch = sort_channels(alive, wanted)
 
     limits = cfg.get("limits") or {}
     max_per = int(limits.get("max_per_channel", 0))
@@ -455,16 +481,20 @@ def main() -> int:
         sorted_ch = limit_per_channel(sorted_ch, max_per)
         print(f"after per-channel cap (max={max_per}): {len(sorted_ch)} (was {before})")
 
-    output = render_m3u(sorted_ch, keywords)
+    output = render_m3u(sorted_ch, wanted)
     OUTPUT_PATH.write_text(output, encoding="utf-8")
-    sports_count = sum(1 for c in sorted_ch if is_sport(c, keywords) < 10**6)
+
+    found_norms = {c.norm_name for c in sorted_ch}
+    missing = [w for w in wanted if _normalize_for_match(w) not in found_norms]
     if sorted_ch:
         avg_kbps = sum(c.throughput_kbps for c in sorted_ch) // len(sorted_ch)
         median_kbps = sorted(c.throughput_kbps for c in sorted_ch)[len(sorted_ch) // 2]
     else:
         avg_kbps = median_kbps = 0
-    print(f"wrote {OUTPUT_PATH} ({len(sorted_ch)} channels, {sports_count} sports, "
+    print(f"wrote {OUTPUT_PATH} ({len(sorted_ch)}/{len(wanted)} channels, "
           f"avg {avg_kbps} KB/s, median {median_kbps} KB/s)")
+    if missing:
+        print(f"missing: {missing}")
     return 0
 
 
