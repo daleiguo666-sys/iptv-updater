@@ -28,40 +28,25 @@ filter:
   mode: whitelist
   keywords:
     - CCTV
-    - 卫视
-    - 体育
-    - 咪咕
     - 凤凰
-    - 翡翠
-    - 综艺
-    - 财经
-    - 新闻
-    - 影视
-    - 电视剧
-    - 少儿
-    - 动画
+    - 咪咕
   # 按 tvg-id 后缀的国家码过滤（iptv-org 源会带 .cn@/.us@/.jp@ 等标识）
-  # cn=中国大陆 hk=香港 tw=台湾 mo=澳门；其他国家全部丢弃
-  # tvg-id 不含国家标识的频道直接放行（vbskycn 等国内源不带 tvg-id）
+  # cn=中国大陆 hk=香港 tw=台湾 mo=澳门
   allowed_countries: [cn, hk, tw, mo]
 
 # 每个频道名（归一化后）最多保留前 N 个最快 URL
+# 设为 1 表示每个频道只留最快/质量最好的那一条
 limits:
-  max_per_channel: 3
+  max_per_channel: 1
 
 probe:
-  # 探活总超时（单 HTTP 请求）
   timeout_seconds: 4
   workers: 64
   fetch_timeout_seconds: 10
-  # 下载 segment 测速：读多少字节判定为流畅
   segment_read_bytes: 65536
-  # 吞吐量阈值 KB/s，低于此值丢弃（100 KB/s ≈ 800 Kbps，能跑低码率 SD）
-  # 想要"高清流畅"调到 300+，想留更多频道调到 50
-  min_kbps: 100
-  # 首字节延迟阈值
+  # 50 KB/s ≈ 400 Kbps，SD 都能跑；放宽换更多通过率
+  min_kbps: 50
   max_latency_ms: 3000
-  # 手机一般播不了 udp/rtp，建议保持 false
   keep_non_http: false
 
 blacklist_domains: []

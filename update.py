@@ -41,7 +41,10 @@ class Channel:
 
     @property
     def norm_name(self) -> str:
-        s = self.name.upper().replace(" ", "").replace("-", "").replace("_", "")
+        # Strip parenthesized/bracketed qualifiers like "(720p)" / "[Not 24/7]"
+        # so CCTV-5 and CCTV-5 (720p) collapse to the same channel
+        s = re.sub(r"[\(\[].*?[\)\]]", "", self.name)
+        s = s.upper().replace(" ", "").replace("-", "").replace("_", "")
         return re.sub(r"[^A-Z0-9一-鿿+]", "", s)
 
     @property
