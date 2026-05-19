@@ -8,6 +8,7 @@ sources:
   - https://raw.githubusercontent.com/imDazui/Tvlist-awesome-m3u-m3u8/master/IPTV.m3u
   - https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u
 
+# 排序优先级（前缀越前越靠上）
 sports_keywords:
   - CCTV5+
   - CCTV-5+
@@ -23,10 +24,40 @@ sports_keywords:
   - SPORT
   - 体育
 
-blacklist_domains: []
+# 白名单：只保留名字/分组命中下列关键词的频道
+# 想要全量回到 6000+ 频道，把 mode 改成 all
+filter:
+  mode: whitelist
+  keywords:
+    - CCTV
+    - 卫视
+    - 体育
+    - NBA
+    - ESPN
+    - SPORT
+    - 咪咕
+    - 凤凰
+    - 翡翠
+    - 翡翠台
+    - TVB
+    - 香港
+    - 综艺
+    - 财经
+    - 新闻
+
+# 每个频道名（归一化后）最多保留前 N 个最快 URL
+# 同一个 CCTV5 不要塞十几个备选，留前 3 快的足够
+limits:
+  max_per_channel: 3
 
 probe:
-  timeout_seconds: 3
+  timeout_seconds: 2
   workers: 64
   read_bytes: 4096
   fetch_timeout_seconds: 10
+  # 探活通过但延迟超过这个阈值的，视为太慢，丢弃
+  max_latency_ms: 1500
+  # 是否保留 udp/rtp/rtmp 链接（手机一般播不了，建议 false）
+  keep_non_http: false
+
+blacklist_domains: []

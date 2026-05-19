@@ -120,10 +120,12 @@ def dedupe(channels: list[Channel]) -> list[Channel]:
     return list(seen.values())
 
 
-def probe(channel: Channel, timeout: int, read_bytes: int) -> bool:
+def probe(channel: Channel, timeout: int, read_bytes: int, max_latency_ms: int, keep_non_http: bool) -> bool:
     url = channel.url
     if url.startswith(NON_HTTP_SCHEMES):
-        channel.latency_ms = 5000  # de-prioritized but kept
+        if not keep_non_http:
+            return False
+        channel.latency_ms = 5000
         return True
     if not (url.startswith("http://") or url.startswith("https://")):
         return False
@@ -143,7 +145,10 @@ def probe(channel: Channel, timeout: int, read_bytes: int) -> bool:
                 return False
     except Exception:
         return False
-    channel.latency_ms = int((time.monotonic() - t0) * 1000)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    if elapsed_ms > max_latency_ms:
+        return False
+    channel.latency_ms = elapsed_ms
     return True
 
 
@@ -152,13 +157,18 @@ def probe_all(channels: list[Channel], cfg: dict) -> list[Channel]:
     timeout = int(probe_cfg.get("timeout_seconds", 3))
     workers = int(probe_cfg.get("workers", 64))
     read_bytes = int(probe_cfg.get("read_bytes", 4096))
+    max_latency_ms = int(probe_cfg.get("max_latency_ms", 2000))
+    keep_non_http = bool(probe_cfg.get("keep_non_http", False))
 
     alive: list[Channel] = []
     total = len(channels)
-    print(f"probing {total} channels (workers={workers}, timeout={timeout}s)...")
+    print(f"probing {total} channels (workers={workers}, timeout={timeout}s, max_latency={max_latency_ms}ms)...")
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(probe, c, timeout, read_bytes): c for c in channels}
+        futures = {
+            pool.submit(probe, c, timeout, read_bytes, max_latency_ms, keep_non_http): c
+            for c in channels
+        }
         for fut in as_completed(futures):
             done += 1
             if done % 200 == 0 or done == total:
@@ -170,6 +180,32 @@ def probe_all(channels: list[Channel], cfg: dict) -> list[Channel]:
             except Exception:
                 pass
     return alive
+
+
+def filter_whitelist(channels: list[Channel], mode: str, keywords: list[str]) -> list[Channel]:
+    if mode != "whitelist" or not keywords:
+        return channels
+    kws = [k.upper() for k in keywords if k]
+    out: list[Channel] = []
+    for c in channels:
+        hay = (c.name + " " + c.group).upper()
+        if any(kw in hay for kw in kws):
+            out.append(c)
+    return out
+
+
+def limit_per_channel(channels: list[Channel], max_per: int) -> list[Channel]:
+    """channels must already be sorted in priority order."""
+    if not max_per or max_per <= 0:
+        return channels
+    counts: dict[str, int] = {}
+    out: list[Channel] = []
+    for c in channels:
+        n = counts.get(c.norm_name, 0)
+        if n < max_per:
+            out.append(c)
+            counts[c.norm_name] = n + 1
+    return out
 
 
 def is_sport(channel: Channel, keywords: list[str]) -> int:
@@ -231,6 +267,13 @@ def main() -> int:
     filtered = [c for c in raw if not is_blacklisted(c.url, blacklist)]
     print(f"after blacklist: {len(filtered)} (was {len(raw)})")
 
+    filter_cfg = cfg.get("filter") or {}
+    mode = filter_cfg.get("mode", "all")
+    wl_keywords = filter_cfg.get("keywords") or []
+    if mode == "whitelist":
+        filtered = filter_whitelist(filtered, mode, wl_keywords)
+        print(f"after whitelist ({len(wl_keywords)} keywords): {len(filtered)}")
+
     deduped = dedupe(filtered)
     print(f"after dedupe: {len(deduped)}")
 
@@ -242,6 +285,14 @@ def main() -> int:
         return 1
 
     sorted_ch = sort_channels(alive, keywords)
+
+    limits = cfg.get("limits") or {}
+    max_per = int(limits.get("max_per_channel", 0))
+    if max_per > 0:
+        before = len(sorted_ch)
+        sorted_ch = limit_per_channel(sorted_ch, max_per)
+        print(f"after per-channel cap (max={max_per}): {len(sorted_ch)} (was {before})")
+
     output = render_m3u(sorted_ch, keywords)
     OUTPUT_PATH.write_text(output, encoding="utf-8")
     sports_count = sum(1 for c in sorted_ch if is_sport(c, keywords) < 10**6)
