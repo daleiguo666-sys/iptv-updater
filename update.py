@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 import yaml
@@ -24,6 +24,9 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) iptv-updater/1.0"
 NON_HTTP_SCHEMES = ("udp://", "rtp://", "rtmp://", "rtsp://", "p2p://", "p3p://")
 
 
+COUNTRY_RE = re.compile(r"\.([a-z]{2})@", re.IGNORECASE)
+
+
 @dataclass
 class Channel:
     name: str
@@ -33,6 +36,7 @@ class Channel:
     tvg_id: str = ""
     raw_extinf: str = ""
     latency_ms: int = 10**9
+    throughput_kbps: int = 0
     source: str = ""
 
     @property
@@ -120,58 +124,183 @@ def dedupe(channels: list[Channel]) -> list[Channel]:
     return list(seen.values())
 
 
-def probe(channel: Channel, timeout: int, read_bytes: int, max_latency_ms: int, keep_non_http: bool) -> bool:
+def first_hls_url(text: str, base: str) -> str | None:
+    """First non-comment URL in an HLS playlist body, resolved against base."""
+    if not text.startswith("#EXTM3U"):
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        return urljoin(base, line)
+    return None
+
+
+def _is_playlist_path(url: str) -> bool:
+    p = urlparse(url).path.lower()
+    return p.endswith(".m3u8") or p.endswith(".m3u")
+
+
+def _measure_throughput(url: str, timeout: int, target_bytes: int,
+                        headers: dict) -> tuple[int, int] | None:
+    """Return (kbps, elapsed_ms) or None on failure."""
+    t0 = time.monotonic()
+    total = 0
+    try:
+        with requests.get(url, stream=True, timeout=timeout,
+                          headers=headers, allow_redirects=True) as r:
+            if r.status_code >= 400:
+                return None
+            for chunk in r.iter_content(16384):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total >= target_bytes:
+                    break
+                if time.monotonic() - t0 > timeout:
+                    break
+    except Exception:
+        return None
+    elapsed = max(time.monotonic() - t0, 0.001)
+    if total < 16384:
+        return None
+    return int((total / 1024.0) / elapsed), int(elapsed * 1000)
+
+
+def probe(channel: Channel, timeout: int, segment_read_bytes: int,
+          min_kbps: int, max_latency_ms: int, keep_non_http: bool) -> bool:
+    """HLS-aware liveness + throughput probe.
+
+    Single stream connection peeks the first 8KB:
+      - body starts with #EXTM3U → it's a playlist, drill to find a segment
+      - else → it's a media stream, continue reading on the same connection to measure KB/s.
+    Direct streams cost one HTTP request; master playlists cost three.
+    """
     url = channel.url
     if url.startswith(NON_HTTP_SCHEMES):
         if not keep_non_http:
             return False
         channel.latency_ms = 5000
+        channel.throughput_kbps = 0
         return True
     if not (url.startswith("http://") or url.startswith("https://")):
         return False
+
+    headers = {"User-Agent": UA}
     t0 = time.monotonic()
     try:
-        with requests.get(
-            url,
-            stream=True,
-            timeout=timeout,
-            headers={"User-Agent": UA},
-            allow_redirects=True,
-        ) as r:
-            if r.status_code >= 400:
-                return False
-            chunk = next(r.iter_content(read_bytes), b"")
-            if not chunk:
-                return False
+        r = requests.get(url, stream=True, timeout=timeout,
+                         headers=headers, allow_redirects=True)
     except Exception:
         return False
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    if elapsed_ms > max_latency_ms:
+
+    with r:
+        if r.status_code >= 400:
+            return False
+        try:
+            first = next(r.iter_content(8192), b"")
+        except Exception:
+            return False
+        if not first:
+            return False
+
+        is_hls = first[:32].lstrip().startswith(b"#EXTM3U")
+
+        if not is_hls:
+            # Direct media stream — keep reading on the same connection to measure throughput
+            total = len(first)
+            try:
+                for chunk in r.iter_content(16384):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total >= segment_read_bytes:
+                        break
+                    if time.monotonic() - t0 > timeout:
+                        break
+            except Exception:
+                return False
+            elapsed = max(time.monotonic() - t0, 0.001)
+            if total < 16384:
+                return False
+            kbps = int((total / 1024.0) / elapsed)
+            if kbps < min_kbps:
+                return False
+            channel.latency_ms = int(elapsed * 1000)
+            channel.throughput_kbps = kbps
+            return True
+
+        # HLS playlist — read rest of body (playlists are small, cap 256KB)
+        try:
+            rest = b""
+            for chunk in r.iter_content(8192):
+                if chunk:
+                    rest += chunk
+                    if len(rest) > 256 * 1024:
+                        break
+            body = (first + rest).decode("utf-8", errors="ignore")
+        except Exception:
+            return False
+
+    init_ms = int((time.monotonic() - t0) * 1000)
+    if init_ms > max_latency_ms:
         return False
-    channel.latency_ms = elapsed_ms
+
+    # Drill: master → media → segment (1 extra hop max)
+    nxt = first_hls_url(body, url)
+    if not nxt:
+        return False
+    final_url = nxt
+    if _is_playlist_path(nxt):
+        try:
+            r2 = requests.get(nxt, timeout=timeout, headers=headers, allow_redirects=True)
+            if r2.status_code >= 400:
+                return False
+            body2 = r2.text
+        except Exception:
+            return False
+        if body2.startswith("#EXTM3U"):
+            nxt2 = first_hls_url(body2, final_url)
+            if not nxt2:
+                return False
+            final_url = nxt2
+
+    result = _measure_throughput(final_url, timeout, segment_read_bytes, headers)
+    if not result:
+        return False
+    kbps, _ = result
+    if kbps < min_kbps:
+        return False
+
+    channel.latency_ms = init_ms
+    channel.throughput_kbps = kbps
     return True
 
 
 def probe_all(channels: list[Channel], cfg: dict) -> list[Channel]:
     probe_cfg = cfg.get("probe", {}) or {}
     timeout = int(probe_cfg.get("timeout_seconds", 3))
-    workers = int(probe_cfg.get("workers", 64))
-    read_bytes = int(probe_cfg.get("read_bytes", 4096))
-    max_latency_ms = int(probe_cfg.get("max_latency_ms", 2000))
+    workers = int(probe_cfg.get("workers", 32))
+    segment_read_bytes = int(probe_cfg.get("segment_read_bytes", 65536))
+    min_kbps = int(probe_cfg.get("min_kbps", 200))
+    max_latency_ms = int(probe_cfg.get("max_latency_ms", 2500))
     keep_non_http = bool(probe_cfg.get("keep_non_http", False))
 
     alive: list[Channel] = []
     total = len(channels)
-    print(f"probing {total} channels (workers={workers}, timeout={timeout}s, max_latency={max_latency_ms}ms)...")
+    print(f"probing {total} channels (workers={workers}, timeout={timeout}s, "
+          f"min={min_kbps}KB/s, max_latency={max_latency_ms}ms)...")
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(probe, c, timeout, read_bytes, max_latency_ms, keep_non_http): c
-            for c in channels
+            pool.submit(
+                probe, c, timeout, segment_read_bytes,
+                min_kbps, max_latency_ms, keep_non_http,
+            ): c for c in channels
         }
         for fut in as_completed(futures):
             done += 1
-            if done % 200 == 0 or done == total:
+            if done % 100 == 0 or done == total:
                 print(f"  probed {done}/{total} alive={len(alive)}")
             c = futures[fut]
             try:
@@ -180,6 +309,26 @@ def probe_all(channels: list[Channel], cfg: dict) -> list[Channel]:
             except Exception:
                 pass
     return alive
+
+
+def filter_country(channels: list[Channel], allowed: list[str]) -> list[Channel]:
+    """Drop channels whose tvg-id explicitly marks a non-allowed country.
+
+    Pattern in iptv-org IDs: 'XYZ.cn@SD', 'JSPORTS3.jp@SD' — match `.{cc}@`.
+    Channels without a country marker pass through (national sources rarely set tvg-id).
+    """
+    if not allowed:
+        return channels
+    allowed_set = {c.lower() for c in allowed}
+    out: list[Channel] = []
+    for c in channels:
+        m = COUNTRY_RE.search(c.tvg_id or "")
+        if m:
+            if m.group(1).lower() in allowed_set:
+                out.append(c)
+        else:
+            out.append(c)
+    return out
 
 
 def filter_whitelist(channels: list[Channel], mode: str, keywords: list[str]) -> list[Channel]:
@@ -218,7 +367,11 @@ def is_sport(channel: Channel, keywords: list[str]) -> int:
 
 
 def sort_channels(channels: list[Channel], keywords: list[str]) -> list[Channel]:
-    return sorted(channels, key=lambda c: (is_sport(c, keywords), c.latency_ms, c.name))
+    # Sports first (by keyword index), then highest throughput, then lowest latency, then name
+    return sorted(
+        channels,
+        key=lambda c: (is_sport(c, keywords), -c.throughput_kbps, c.latency_ms, c.name),
+    )
 
 
 def render_m3u(channels: list[Channel], keywords: list[str]) -> str:
@@ -274,6 +427,12 @@ def main() -> int:
         filtered = filter_whitelist(filtered, mode, wl_keywords)
         print(f"after whitelist ({len(wl_keywords)} keywords): {len(filtered)}")
 
+    allowed_countries = filter_cfg.get("allowed_countries") or []
+    if allowed_countries:
+        before = len(filtered)
+        filtered = filter_country(filtered, allowed_countries)
+        print(f"after country filter ({allowed_countries}): {len(filtered)} (was {before})")
+
     deduped = dedupe(filtered)
     print(f"after dedupe: {len(deduped)}")
 
@@ -296,7 +455,13 @@ def main() -> int:
     output = render_m3u(sorted_ch, keywords)
     OUTPUT_PATH.write_text(output, encoding="utf-8")
     sports_count = sum(1 for c in sorted_ch if is_sport(c, keywords) < 10**6)
-    print(f"wrote {OUTPUT_PATH} ({len(sorted_ch)} channels, {sports_count} sports)")
+    if sorted_ch:
+        avg_kbps = sum(c.throughput_kbps for c in sorted_ch) // len(sorted_ch)
+        median_kbps = sorted(c.throughput_kbps for c in sorted_ch)[len(sorted_ch) // 2]
+    else:
+        avg_kbps = median_kbps = 0
+    print(f"wrote {OUTPUT_PATH} ({len(sorted_ch)} channels, {sports_count} sports, "
+          f"avg {avg_kbps} KB/s, median {median_kbps} KB/s)")
     return 0
 
 
