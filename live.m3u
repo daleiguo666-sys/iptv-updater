@@ -1,8 +1,6 @@
 #EXTM3U
 #EXTINF:-1 tvg-id="CCTV1.cn@HD" tvg-name="CCTV1" tvg-logo="https://i.imgur.com/TpA3cUl.png" group-title="央视",CCTV1
 http://69.30.245.50/live/cctv1.m3u8
-#EXTINF:-1 tvg-id="CCTV3.cn@SD" tvg-name="CCTV3" tvg-logo="https://i.imgur.com/iFlkIuw.png" group-title="央视",CCTV3
-http://74.91.26.218:82/live/cctv3hd.m3u8
 #EXTINF:-1 tvg-id="CCTV6.cn@HD" tvg-name="CCTV6" tvg-logo="https://i.imgur.com/rFiaef7.png" group-title="央视",CCTV6
 http://69.30.245.50/live/cctv6.m3u8
 #EXTINF:-1 tvg-id="CCTV-9" tvg-name="CCTV9" tvg-logo="https://www.xn--rgv465a.top/tvlogo/CCTV-9.png" group-title="央视",CCTV9
