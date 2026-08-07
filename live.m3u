@@ -1,19 +1,15 @@
 #EXTM3U
 #EXTINF:-1 tvg-id="CCTV1.cn@SD" tvg-name="CCTV1" tvg-logo="https://i.imgur.com/TpA3cUl.png" group-title="央视",CCTV1
 http://74.91.26.218:82/live/cctv1hd.m3u8
-#EXTINF:-1 tvg-id="CCTV-2" tvg-name="CCTV2" tvg-logo="https://www.xn--rgv465a.top/tvlogo/CCTV-2.png" group-title="央视",CCTV2
-http://pull-hls-f1.douyincdn.com/media/stream-407987562509501100/playlist.m3u8?keeptime=00093a80&wsSecret=70ba7ec30965743accbcfb926a58fd7c&wsTime=6a6c7613&exp_hrchy=w1&arch_hrchy=w1&major_anchor_level=common&t_id=037-2026073118165145DD5015353E316620A0-ZYOHNH
 #EXTINF:-1 tvg-id="CCTV3.cn@SD" tvg-name="CCTV3" tvg-logo="https://i.imgur.com/iFlkIuw.png" group-title="央视",CCTV3
 http://74.91.26.218:82/live/cctv3hd.m3u8
-#EXTINF:-1 tvg-id="CCTV-4" tvg-name="CCTV4" tvg-logo="https://tb.zbds.top/logo/CCTV4.png" group-title="央视",CCTV4
+#EXTINF:-1 tvg-id="22" tvg-name="CCTV4" tvg-logo="https://tb.zbds.top/logo/CCTV4.png" group-title="央视",CCTV4
 https://dash2.antik.sk/live/test_cctv_tizen/playlist.m3u8
 #EXTINF:-1 tvg-id="CCTV-9" tvg-name="CCTV9" tvg-logo="https://www.xn--rgv465a.top/tvlogo/CCTV-9.png" group-title="央视",CCTV9
 http://74.91.26.218:82/live/cctv9hd.m3u8
 #EXTINF:-1 tvg-id="CCTV-10" tvg-name="CCTV10" tvg-logo="https://www.xn--rgv465a.top/tvlogo/CCTV-10.png" group-title="央视",CCTV10
 http://223.78.65.165:9901/tsfile/live/0011_1.m3u8?key=txiptv&playlive=1&authid=0
-#EXTINF:-1 tvg-id="CCTV11" tvg-name="CCTV11" tvg-logo="https://tb.zbds.top/logo/CCTV11.png" group-title="央视",CCTV11
-http://112.27.235.94:8000/hls/12/index.m3u8
 #EXTINF:-1 tvg-id="CCTV12.cn@SD" tvg-name="CCTV12" tvg-logo="https://i.imgur.com/3yTuiOM.png" group-title="央视",CCTV12
 http://74.91.26.218:82/live/cctv12hd.m3u8
-#EXTINF:-1 tvg-id="CCTV13" tvg-name="CCTV13" tvg-logo="https://tb.zbds.top/logo/CCTV13.png" group-title="央视",CCTV13
-http://ali-m-l.cztv.com/channels/lantian/channel21/1080p.m3u8
+#EXTINF:-1 tvg-id="CCTV-13" tvg-name="CCTV13" tvg-logo="https://www.xn--rgv465a.top/tvlogo/CCTV-13.png" group-title="央视",CCTV13
+http://113.57.140.161:10081/newlive/live/hls/14/live.m3u8
